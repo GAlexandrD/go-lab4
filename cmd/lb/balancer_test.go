@@ -1,6 +1,7 @@
 package main
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,14 +22,17 @@ func TestBalancer(t *testing.T) {
 	serversPool := []serverType{
 		{
 			dst:       "server1:8080",
-			isWorking: true,
+			isWorking: &atomic.Bool{},
 		}, {
 			dst:       "server2:8080",
-			isWorking: true,
+			isWorking: &atomic.Bool{},
 		}, {
 			dst:       "server3:8080",
-			isWorking: true,
+			isWorking: &atomic.Bool{},
 		},
+	}
+	for _, server := range serversPool {
+		server.isWorking.Swap(true)
 	}
 	hc := new(mockHealthChecker)
 	b := &Balancer{hc: hc, pool: serversPool}
@@ -50,7 +54,7 @@ func TestBalancer(t *testing.T) {
 		assert.Equal(t, 0, index, "getIndex call: expected %d, got %d", 0, index)
 
 		for i := range b.pool {
-			b.pool[i].isWorking = false
+			b.pool[i].isWorking.Swap(false)
 		}
 		index, err = b.getIndex()
 		assert.NotNil(t, err, "error didn't occured when all servers stoped, index is %d", index)
@@ -58,7 +62,7 @@ func TestBalancer(t *testing.T) {
 
 	t.Run("test runChecker routine", func(t *testing.T) {
 		for i := range b.pool {
-			b.pool[i].isWorking = true
+			b.pool[i].isWorking.Swap(true)
 			b.pool[i].dataTransferred = 0
 		}
 		b.pool[1].dataTransferred = 1000

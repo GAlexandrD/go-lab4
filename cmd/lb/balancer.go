@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/roman-mazur/design-practice-2-template/httptools"
@@ -26,8 +27,8 @@ var (
 
 type serverType struct {
 	dst             string
-	dataTransferred int
-	isWorking       bool
+	dataTransferred int64
+	isWorking       *atomic.Bool
 }
 
 var (
@@ -36,15 +37,15 @@ var (
 		{
 			dst:             "server1:8080",
 			dataTransferred: 0,
-			isWorking:       false,
+			isWorking: &atomic.Bool{},
 		}, {
 			dst:             "server2:8080",
 			dataTransferred: 0,
-			isWorking:       false,
+			isWorking: &atomic.Bool{},
 		}, {
 			dst:             "server3:8080",
 			dataTransferred: 0,
-			isWorking:       false,
+			isWorking: &atomic.Bool{},
 		},
 	}
 )
@@ -79,10 +80,12 @@ func (b *Balancer) runChecker() {
 	for i := range b.pool {
 		server := &b.pool[i]
 		go func() {
-			server.isWorking = b.hc.health(server.dst)
+			isWorking := b.hc.health(server.dst)
+			server.isWorking.Swap(isWorking)
 			for range time.Tick(10 * time.Second) {
-				server.isWorking = b.hc.health(server.dst)
-				log.Println(server)
+				isWorking := b.hc.health(server.dst)
+				server.isWorking.Swap(isWorking)
+				log.Printf("[ %s data: %d isWorking: %t ]", server.dst, server.dataTransferred, isWorking)
 			}
 		}()
 	}
@@ -133,8 +136,8 @@ func (b *Balancer) forward(server *serverType, rw http.ResponseWriter, r *http.R
 	if err == nil {
 
 		// count length of server response and save it
-		length := headerLength(resp.Header) + int(resp.ContentLength)
-		server.dataTransferred += length
+		length := headerLength(resp.Header) + resp.ContentLength
+		atomic.AddInt64(&server.dataTransferred, length)
 
 		for k, values := range resp.Header {
 			for _, value := range values {
@@ -143,7 +146,7 @@ func (b *Balancer) forward(server *serverType, rw http.ResponseWriter, r *http.R
 		}
 		if *traceEnabled {
 			rw.Header().Set("lb-from", server.dst)
-			rw.Header().Set("lb-size", strconv.Itoa(length))
+			rw.Header().Set("lb-size", strconv.Itoa(int(length)))
 		}
 		log.Println("fwd", resp.StatusCode, resp.Request.URL)
 		rw.WriteHeader(resp.StatusCode)
@@ -167,9 +170,9 @@ func main() {
 
 func (b *Balancer) getIndex() (int, error) {
 	index := 0
-	minData := math.MaxInt
+	minData := int64(math.MaxInt64)
 	for i := range b.pool {
-		if !b.pool[i].isWorking {
+		if !b.pool[i].isWorking.Load() {
 			continue
 		}
 		curData := b.pool[i].dataTransferred
@@ -178,13 +181,13 @@ func (b *Balancer) getIndex() (int, error) {
 			minData = curData
 		}
 	}
-	if !b.pool[index].isWorking {
+	if !b.pool[index].isWorking.Load() {
 		return 0, errors.New("There are no servers available")
 	}
 	return index, nil
 }
 
-func headerLength(header http.Header) int {
+func headerLength(header http.Header) int64 {
 	var str string
 	for key, values := range header {
 		for _, value := range values {
@@ -193,5 +196,5 @@ func headerLength(header http.Header) int {
 	}
 	byteSlice := []byte(str)
 	byteCount := len(byteSlice)
-	return byteCount
+	return int64(byteCount)
 }
