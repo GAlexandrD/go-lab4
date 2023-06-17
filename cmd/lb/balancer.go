@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"math"
 	"net/http"
 	"strconv"
 	"sync/atomic"
@@ -57,6 +56,7 @@ type healthCheckerInterface interface {
 type Balancer struct {
 	pool []serverType
 	hc   healthCheckerInterface
+	curMin int64
 }
 
 func scheme() string {
@@ -138,6 +138,10 @@ func (b *Balancer) forward(server *serverType, rw http.ResponseWriter, r *http.R
 		// count length of server response and save it
 		length := headerLength(resp.Header) + resp.ContentLength
 		atomic.AddInt64(&server.dataTransferred, length)
+		if server.dataTransferred > b.curMin {
+			atomic.SwapInt64(&b.curMin, server.dataTransferred)
+		}
+
 
 		for k, values := range resp.Header {
 			for _, value := range values {
@@ -169,22 +173,28 @@ func main() {
 }
 
 func (b *Balancer) getIndex() (int, error) {
-	index := 0
-	minData := int64(math.MaxInt64)
+	workingPool := []int{}
+	equal := []int{}
 	for i := range b.pool {
 		if !b.pool[i].isWorking.Load() {
 			continue
 		}
+		workingPool = append(workingPool, i)
 		curData := b.pool[i].dataTransferred
-		if curData < minData {
-			index = i
-			minData = curData
+		if curData < b.curMin {
+			return i, nil
+		}
+		if curData == b.curMin {
+			equal = append(equal, i)
 		}
 	}
-	if !b.pool[index].isWorking.Load() {
+	if len(equal) != 0 {
+		return equal[0], nil
+	}
+	if len(workingPool) == 0 {
 		return 0, errors.New("There are no servers available")
 	}
-	return index, nil
+	return workingPool[0], nil
 }
 
 func headerLength(header http.Header) int64 {
